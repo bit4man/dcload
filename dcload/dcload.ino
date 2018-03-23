@@ -1,22 +1,20 @@
-#include <TimerOne.h>
-
 //SCULLCOM HOBBY ELECTRONICS
 //ELECTRONIC DC LOAD PROJECT
-//Software Version 24
-//24th March 2017
+//Software Version 34B (4x4 Matrix Keypad Version)
+//25th February 2018
 
 #include <SPI.h>                              //include SPI library (Serial Peripheral Interface)
 #include <Wire.h>                             //include I2C library
-#include <LCD.h>                              //
+//#include <LCD.h>                            //
 #include <LiquidCrystal_I2C.h>                // F Malpartida's NewLiquidCrystal library
                                               // https://bitbucket.org/fmalpartida/new-liquidcrystal/downloads/NewliquidCrystal_1.3.4.zip
 #include <math.h>                             //
 #include <Adafruit_MCP4725.h>                 //Adafruit DAC library  https://github.com/adafruit/Adafruit_MCP4725
 #include <MCP342x.h>                          //Steve Marple library avaiable from    https://github.com/stevemarple/MCP342x
 #include <MCP79410_Timer.h>                   //Scullcom Hobby Electronics library  http://www.scullcom.com/MCP79410Timer-master.zip
+#include <EEPROM.h>                           //include EEPROM library used for storing setup data
 
 #include <Keypad.h>                           //http://playground.arduino.cc/Code/Keypad
-
 
 const byte ROWS = 4;                          //four rows
 const byte COLS = 4;                          //four columns
@@ -50,7 +48,7 @@ MCP79410_Timer timer = MCP79410_Timer(MCP79410_ADDRESS);
 //ADDR,EN,R/W,RS,D4,D5,D6,D7
 LiquidCrystal_I2C lcd(0x27,2,1,0,4,5,6,7);    //0x27 is the default address of the LCD with I2C bus module
 
-const byte pinA = 3;                          //digital pin (also interrupt pin) for the A pin of the Rotary Encoder
+const byte pinA = 2;                          //digital pin (also interrupt pin) for the A pin of the Rotary Encoder (changed to digital pin 2)
 const byte pinB = 4;                          //digital pin for the B pin of the Rotary Encoder
 
 const byte CursorPos = 17;                    //analog pin A3 used as a digital pin to set cursor position (rotary encoder push button)
@@ -58,13 +56,9 @@ const byte LoadOnOff = 15;                    //analog pin A1 used as a digital 
 
 const byte TriggerPulse = 16;                 //analog pin A2 used as a digital pin for trigger pulse input in transient mode
 
-const byte fan = 2;                           //digital pin 2 for fan control output
-const byte temperature = A0;                  //analog pin used for temperature output from LM35
+const byte fan = 3;                           //digital pin 3 for fan control output (changed to Digital pin 3)
+const byte temperature = A6;                  //analog pin used for temperature output from LM35 (was A0 previously but changed)
 int temp;                                     //
-int tempCutOff = 60;
-int tempMin = 26;                             //temperature at which to start the fan
-int tempMax = 50;                             //maximum temperature when fan speed at 100%
-int fanSpeed;
 
 float BatteryLife = 0;                        //
 float BatteryLifePrevious = 0;                //
@@ -88,10 +82,10 @@ float reading = 0;                            //variable for Rotary Encoder valu
 float setCurrent = 0;                         //variable used for the set current of the load
 float setPower = 0;                           //variable used for the set power of the load
 float setResistance = 0;                      //variable used for the set resistance of the load
-float setCurrentCalibrationFactor = 0.997;    //calibration adjustment - set as required
+float setCurrentCalibrationFactor = 1;        //calibration adjustment - set as required if needed (was 0.997)
 
-float voltageOffset = 0;                      //variable to store voltage reading zero offset adjustment at switch on
-float currentOffset = 0;                      //variable to store current reading zero offset adjustment at switch on
+float displayCurrentCal = 0.040;              //calibration correction for LCD current display
+int Load = 0;                                 //Load On/Off flag
 
 float setControlCurrent = 0;                  //variable used to set the temporary store for control current required
 
@@ -101,10 +95,14 @@ float ActualVoltage = 0;                      //variable used for Actual Voltage
 float ActualCurrent = 0;                      //variable used for Actual Current reading of Load
 float ActualPower = 0;                        //variable used for Actual Power reading of Load
 
-float PowerCutOff = 50;                       //maximum Power allowed in Watts - then limited to this level CAN BE CHANGED AS REQUIRED
-float CurrentCutOff = 5;                      //maximum Current setting allowed in Amps - then limited to this level
+float ResistorCutOff = 999;                   //maximum Resistor we want to deal with in software
 float BatteryCurrent;                         //
 float LoadCurrent;                            //
+
+//int CurrentCutOff = eeprom_read_dword(0x00);
+int CurrentCutOff = EEPROM.read(0x00);
+int PowerCutOff = EEPROM.read(0x20);
+int tempCutOff = EEPROM.read(0x40);
 
 int setReading = 0;                           //
 
@@ -118,35 +116,38 @@ int modeSelected = 0;                         //Mode status flag
 int lastCount = 50;                           //
 volatile float encoderPosition = 0;           //
 volatile unsigned long factor= 0;             //number of steps to jump
-volatile unsigned long encoderMax = 50000;    //sets maximum Rotary Encoder value allowed CAN BE CHANGED AS REQUIRED
+volatile unsigned long encoderMax = 999000;   //sets maximum Rotary Encoder value allowed CAN BE CHANGED AS REQUIRED (was 50000)
 
-float LiPoCutOffVoltage = 3.0;
-float LiFeCutOffVoltage = 2.8;
-float NiCdCutOffVoltage = 1.0;
-float ZiZnCutOffVoltage = 1.0;
-float PbAcCutOffVoltage = 1.75;
+float LiPoCutOffVoltage = 3.0;                //set cutoff voltage for LiPo battery
+float LiFeCutOffVoltage = 2.8;                //set cutoff voltage for LiFe battery
+float NiCdCutOffVoltage = 1.0;                //set cutoff voltage for NiCd battery
+float ZiZnCutOffVoltage = 1.0;                //set cutoff voltage for ZiZn battery
+float PbAcCutOffVoltage = 1.75;               //set cutoff voltage for PbAc battery
 String BatteryType ="    ";
 
-byte exitMode = 0;      //used to exit battery selection menu and return to CC Mode
+byte exitMode = 0;                           //used to exit battery selection menu and return to CC Mode
 
-char numbers[20];     // keypad number entry - Plenty to store a representation of a float
+char numbers[10];                            //keypad number entry - Plenty to store a representation of a float
 byte index = 0;
-int z = 0;
+int z = 1;                                   //was 0
 float x = 0;
 int y = 0;
 int r = 0;
 
-float LowCurrent = 0;               //the low current setting
-float HighCurrent = 0;              //the high current setting
-unsigned long transientPeriod;      //used to store pulse time period 
+float LowCurrent = 0;               //the low current setting for transcient mode
+float HighCurrent = 0;              //the high current setting for transcient mode
+unsigned long transientPeriod;      //used to store pulse time period in transcient pulse mode
 unsigned long current_time;         //used to store the current time in microseconds
-unsigned long last_time;            //used to store the time of the last trasient switch in micro seconds
-boolean transient_mode_status;      //used to maintain the state of the trasient mode (false = low current, true = high current)
+unsigned long last_time;            //used to store the time of the last transient switch in micro seconds
+boolean transient_mode_status;      //used to maintain the state of the trascient mode (false = low current, true = high current)
+
+float transientList [10][2];        //array to store Transient List data
+int total_instructions;             //used in Transient List Mode
+int current_instruction;            //used in Transient List Mode
 
 //--------------------------------Interrupt Routine for Rotary Encoder------------------------
 void isr()
 {
-  noInterrupts();
   static unsigned long lastInterruptTime = 0;
   unsigned long interruptTime = millis();
 
@@ -160,15 +161,15 @@ void isr()
     encoderPosition = min(encoderMax, max(0, encoderPosition));  // sets maximum range of rotary encoder
     lastInterruptTime = interruptTime;
   }
-  interrupts();
-}
+    }
 //---------------------------------Initial Set up---------------------------------------
 void setup() {
   Serial.begin(9600);                                      //used for testing only
-
+ 
   Wire.begin();                                            //join i2c bus (address optional for master)
+  Wire.setClock(400000L);                                  //sets bit rate to 400KHz
 
-  MCP342x::generalCallReset();                             // Reset devices
+  MCP342x::generalCallReset();                             //Reset devices
   delay(1);                                                //MC342x needs 300us to settle, wait 1ms - (may not be required)
 
   pinMode (pinA, INPUT);
@@ -180,16 +181,12 @@ void setup() {
   pinMode (TriggerPulse, INPUT_PULLUP);
 
   pinMode (fan, OUTPUT);
+  TCCR2B = (TCCR2B & 0b11111000) | 1;                      //change PWM to above hearing (Kenneth Larvsen recommendation)
   pinMode (temperature, INPUT);
-
-  pinMode(13,OUTPUT);
-
-  Timer1.initialize(100000); // .1 sec timer
-  Timer1.attachInterrupt( timerIsr );
  
   analogReference(INTERNAL);                               //use Arduino internal reference for tempurature monitoring
 
-  attachInterrupt(digitalPinToInterrupt(pinB), isr, LOW);
+  attachInterrupt(digitalPinToInterrupt(pinA), isr, LOW);
 
   dac.begin(0x61);                                         //the DAC I2C address with MCP4725 pin A0 set high
   dac.setVoltage(0,false);                                 //reset DAC to zero for no output current set at Switch On
@@ -206,9 +203,12 @@ void setup() {
   lcd.setCursor(1,2);
   lcd.print("DC Electronic Load"); //
   lcd.setCursor(0,3);
-  lcd.print("Software Version 24"); //
-  delay(3000);                                             //3000 mSec delay for intro display
+  lcd.print("Ver. 34B(4x4 Keypad)"); //
+  delay(2000);                                             //3000 mSec delay for intro display
   lcd.clear();                                             //clear dislay
+  setupLimits();
+  delay(3000);
+  lcd.clear();
 
   last_time = 0;                                           //set the last_time to 0 at the start (Transicent Mode)
   transient_mode_status = false;                           //set the initial transient mode status (false = low, true = high);
@@ -224,30 +224,37 @@ void setup() {
 
 //------------------------------------------Main Program Loop---------------------------------
 void loop() {
-  readKeypadInput();                                     //read Keypad entry
-  LoadSwitch();                                          //Load on/off
 
+ if(CurrentCutOff > 5){                                 //Test and go to user set limits if required
+    userSetUp();
+     }else{
+  
+  readKeypadInput();                                     //read Keypad entry
+  
+  if (digitalRead(LoadOnOff) == LOW) {
+    LoadSwitch();                                          //Load on/off
+  }
+  
   transient();                                           //test for Transient Mode
   
   lcd.setCursor(18,3);                                   //sets display of Mode indicator at bottom right of LCD
   lcd.print(Mode);                                       //display mode selected on LCD (CC, CP, CR or BC)
 
-  if(Mode != "TC" && Mode != "TP" && Mode != "TT"){      //if NOT transient mode then Normal Operation
-  reading = encoderPosition/1000;                        //read input from rotary encoder 
-  maxConstantCurrentSetting();                           //set maxiumum Current allowed in Constant Current Mode (CC)
-  powerLevelCutOff();                                    //Check if Power Limit has been exceeded
-  temperatureCutOff();                                   //check if Maximum Temperature is exceeded
-  batteryCurrentLimitValue();                            //Battery Discharge Constant Current Limit Value in BC Mode
-  displayEncoderReading();                               //display rotary encoder input reading on LCD
-  delay(10);                                           //used to test - may not be required
-  lastCount = encoderPosition;                           //store rotary encoder current position
-  CursorPosition();                                      //check and change the cursor position if cursor button pressed
-    }else{
-  transientLoadToggle();                                  //Start Transient Mode
-  Serial.print("Current: ");                            //used for testing only
-  Serial.println(setCurrent);                           //used for testing only
-    }
-
+  if(Mode != "TC" && Mode != "TP" && Mode != "TT" && Mode != "TL"){      //if NOT transient mode then Normal Operation
+    reading = encoderPosition/1000;                        //read input from rotary encoder 
+    maxConstantCurrentSetting();                           //set maxiumum Current allowed in Constant Current Mode (CC)
+    powerLevelCutOff();                                    //Check if Power Limit has been exceeded
+  
+    temperatureCutOff();                                   //check if Maximum Temperature is exceeded
+  
+    batteryCurrentLimitValue();                            //Battery Discharge Constant Current Limit Value in BC Mode
+    displayEncoderReading();                               //display rotary encoder input reading on LCD
+    lastCount = encoderPosition;                           //store rotary encoder current position
+    CursorPosition();                                      //check and change the cursor position if cursor button pressed
+  }else{
+    transientLoadToggle();                                  //Start Transient Mode
+  }
+    
   readVoltageCurrent();                                  //routine for ADC's to read actual Voltage and Current
   ActualReading();                                       //Display actual Voltage, Current readings and Actual Wattage
   
@@ -256,21 +263,16 @@ void loop() {
 
   batteryCapacity();                                     //test if Battery Capacity (BC) mode is selected - if so action
   fanControl();                                          //call heatsink fan control
+  }
 }
-
 //------------------------------------------------Read Keypad Input-----------------------------------------------------
 void readKeypadInput (void) {
   customKey = customKeypad.getKey();
   
- // if (customKey != NO_KEY){                             //only used for testing keypad
+ //if (customKey != NO_KEY){                             //only used for testing keypad
  //Serial.print("customKey = ");                          //only used for testing keypad
  //Serial.println(customKey);                             //only used for testing keypad
- // }                                                     //only used for testing keypad
-
-if(customKey == '#' && digitalRead(CursorPos) == LOW){    //check if Zero Offset Selected (press * and Cursor Button together){
-  toggle = false;                                         //switch Load OFF
-  zeroOffset();
-}
+ //}                                                     //only used for testing keypad
 
 if(customKey == '*' && digitalRead(CursorPos) == LOW){    //check if Set-Up Mode Selected (press * and Cursor Button together)
   delay(200);
@@ -278,7 +280,7 @@ if(customKey == '*' && digitalRead(CursorPos) == LOW){    //check if Set-Up Mode
   userSetUp();
   encoderPosition = 0;                                    //reset encoder reading to zero
   index = 0;
-  z = 0;
+  z = 1;                                                  //sets column position for LCD displayed character
   decimalPoint = (' ');                                   //clear decimal point text character reset
 }
 
@@ -288,7 +290,7 @@ if(customKey == 'A' && digitalRead(CursorPos) == LOW){    //check if Transient M
  
   encoderPosition = 0;                                    //reset encoder reading to zero
   index = 0;
-  z = 0;
+  z = 1;                                                  //sets column position for LCD displayed character
   decimalPoint = (' ');                                   //clear decimal point text character reset
   }
                
@@ -299,7 +301,7 @@ if(customKey == 'A' && digitalRead(CursorPos) == LOW){    //check if Transient M
   Current();                                              //if selected go to Constant Current Selected routine
   encoderPosition = 0;                                    //reset encoder reading to zero
   index = 0;
-  z = 0;
+  z = 1;                                                  //sets column position for LCD displayed character
   decimalPoint = (' ');                                   //clear decimal point test character reset
   }
          
@@ -310,7 +312,7 @@ if(customKey == 'A' && digitalRead(CursorPos) == LOW){    //check if Transient M
   Power();                                                //if selected go to Constant Power Selected routine
   encoderPosition = 0;                                    //reset encoder reading to zero
   index = 0;
-  z = 0;
+  z = 1;                                                  //sets column position for LCD displayed character
   decimalPoint = (' ');                                   //clear decimal point test character reset
   }
           
@@ -321,7 +323,7 @@ if(customKey == 'A' && digitalRead(CursorPos) == LOW){    //check if Transient M
   Resistance();                                           //if selected go to Constant Resistance Selected routine
   encoderPosition = 0;                                    //reset encoder reading to zero
   index = 0;
-  z = 0;
+  z = 1;                                                  //sets column position for LCD displayed character
   decimalPoint = (' ');                                   //clear decimal point test character reset
   }
 
@@ -330,7 +332,7 @@ if(customKey == 'A' && digitalRead(CursorPos) == LOW){    //check if Transient M
   toggle = false;                                         //switch Load OFF
   batteryType();                                          //select battery type
   index = 0;
-  z = 0;
+  z = 1;                                                  //sets column position for LCD displayed character
   decimalPoint = (' ');                                   //clear decimal point test character reset
 
     if (exitMode == 1){                                   //if NO battery type selected revert to CC Mode
@@ -348,6 +350,7 @@ if(customKey == 'A' && digitalRead(CursorPos) == LOW){    //check if Transient M
     lcd.print("OFF");
     timer.reset();                                        //reset timer
     BatteryLifePrevious = 0;
+    CP = 9;                                               //set cursor position
     BatteryCapacity();                                    //go to Battery Capacity Routine
     }
   }
@@ -373,13 +376,14 @@ if (Mode != "BC"){
         }
       }
 
+
   if(customKey == '#') {                                //check if Load ON/OFF button pressed
     x = atof(numbers);     
          reading = x;
          encoderPosition = reading*1000;
          index = 0;
          numbers[index] = '\0';
-         z = 0;
+         z = 1;                                             //sets column position for LCD displayed character
          lcd.setCursor(0,3);
          lcd.print("        ");
          decimalPoint = (' ');                          //clear decimal point test character reset
@@ -396,6 +400,21 @@ void maxConstantCurrentSetting (void) {
   lcd.setCursor(0,3);
   lcd.print("                    ");                      //20 spaces to clear last line of LCD 
   }
+
+  if (Mode == "CP" && reading > PowerCutOff) {             //Limit maximum Current Setting
+        reading = PowerCutOff;
+        encoderPosition = (PowerCutOff * 1000);            //keep encoder position value at maximum Current Limit
+        lcd.setCursor(0,3);
+        lcd.print("                    ");                   //20 spaces to clear last line of LCD 
+    }
+
+   if (Mode == "CR" && reading > ResistorCutOff ) {             //Limit maximum Current Setting
+        reading = ResistorCutOff;
+        encoderPosition = (ResistorCutOff * 1000);            //keep encoder position value at maximum Current Limit
+        lcd.setCursor(0,3);
+        lcd.print("                    ");                   //20 spaces to clear last line of LCD 
+    }
+
 }
 
 //----------------------Power Level Cutoff Routine-------------------------------------------
@@ -413,7 +432,7 @@ void powerLevelCutOff (void) {
   }
 }
 
-//----------------------Constant Current Limit Value------------------------------------------
+//----------------------Battery Constant Current Limit Value------------------------------------------
 void batteryCurrentLimitValue (void) {
   if (Mode == "BC" && reading > MaxBatteryCurrent){
   reading = MaxBatteryCurrent;
@@ -423,50 +442,55 @@ void batteryCurrentLimitValue (void) {
 
 //----------------------Display Rotary Encoder Input Reading on LCD---------------------------
 void displayEncoderReading (void) {
-  lcd.setCursor(8,2);                                    //start position of setting entry
-  if (reading < 10) {                                    //add a leading zero to display if reading less than 10
-  lcd.print("0"); 
-  }
-  
-  lcd.print (reading,3);                                 //show input reading from Rotary Encoder on LCD
-  
-  lcd.setCursor (CP, 2);                                 //sets cursor position
-  lcd.cursor();                                          //show cursor on LCD
+
+    lcd.setCursor(8,2);                                      //start position of setting entry
+
+    if ( ( Mode == "CP" || Mode == "CR" ) && reading < 100 ) {
+        lcd.print("0");
+    }
+    
+    if (reading < 10) {                                      //add a leading zero to display if reading less than 10
+        lcd.print("0"); 
+    }
+
+    if ( Mode == "CP" || Mode == "CR" ) {
+        lcd.print (reading, 2);                              //show input reading from Rotary Encoder on LCD
+    } else {
+        lcd.print (reading, 3);
+    }
+    lcd.setCursor (CP, 2);                                   //sets cursor position
+    lcd.cursor();                                            //show cursor on LCD
 }
 
 //--------------------------Cursor Position-------------------------------------------------------
-//Change the position routine
+//Change cursor the position routine
 void CursorPosition(void) {
-  if (digitalRead(CursorPos) == LOW) {
-    
-  delay(200);                                              //simple key bounce delay  
-    CP = CP + 1;
-    if (CP==10){
-      CP=CP+1;
-    } 
-  }
-  if (CP>13){
-    CP=8;                                                 //
-  }
-  if (CP == 13){
-  factor = 1;
-  }
-  if (CP == 12) {
-  factor = 10;
-  }
-  if (CP == 11){
-  factor = 100;
-  }
-  if (CP == 9){
-  factor = 1000;
-  }
 
-  if (CP == 8) {                                           //
-  factor = 10000;                                          //
-  }
+    // Defaults for two digits before decimal and 3 after decimal point
+    int unitPosition = 9;
+
+    //Power and Resistance modes can be 3 digit before decimal but only 2 decimals
+    if ( Mode == "CP" || Mode == "CR" ) {
+        unitPosition = 10;        
+    }
+
+    if (digitalRead(CursorPos) == LOW) {
+    
+        delay(200);                                          //simple key bounce delay  
+        CP = CP + 1;
+        if (CP == unitPosition + 1 ) {
+            CP = CP + 1;
+        }
+    }
+    
+    if (CP > 13)  { CP = unitPosition; }                     //No point in turning tens and hundreds
+    if (CP == unitPosition +4 ) { factor = 1; }
+    if (CP == unitPosition +3 ) { factor = 10; }
+    if (CP == unitPosition +2 ) { factor = 100; }
+    if (CP == unitPosition )    { factor = 1000; }
 }
 
-//-----------------------Read Voltage and Current---------------------------------------------
+//---------------------------------------------Read Voltage and Current--------------------------------------------------------------
 void readVoltageCurrent (void) {
   
   MCP342x::Config status;
@@ -482,11 +506,17 @@ void readVoltageCurrent (void) {
   
 }
 
-//----------------------Calculate Actual Voltage and Current and display on LCD---------------------
+//-----------------------------------Calculate Actual Voltage and Current and display on LCD-----------------------------------------
 void ActualReading(void) {
-  ActualCurrent = ((((current - currentOffset)*2.048)/32767) * 2.5);        //calculate load current
-  ActualVoltage = ((((voltage - voltageOffset)*2.048)/32767) * 50.4);         //calculate load voltage upto 100v (was 50)
+
+  ActualCurrent = (((current*2.048)/32767) * 2.5);        //calculate load current
+  currentDisplayCal();                                    //LCD display current calibration correction
+  ActualVoltage = (((voltage*2.048)/32767) * 50.4);       //calculate load voltage upto 100v (was 50)
   ActualPower = ActualVoltage*ActualCurrent;
+
+  if (ActualPower <=0){
+    ActualPower = 0;
+  }
 
  if (ActualVoltage <=0.0){                              //added to prevent negative readings on LCD due to error
   ActualVoltage = 0.0;
@@ -494,21 +524,32 @@ void ActualReading(void) {
  if (ActualCurrent <= 0.0){                             //added to prevent negative readings on LCD due to error
   ActualCurrent = 0.0;
  }
-  
-  if (ActualVoltage <10.0) {
-    VoltsDecimalPlaces = 3;
-    }else{
-    VoltsDecimalPlaces = 2;
-    }
  
-  lcd.setCursor(0,1);
-    lcd.print(ActualCurrent,3);
+ lcd.setCursor(0,1);
+    
+    if ( ActualCurrent < 10.0 ) {
+        lcd.print(ActualCurrent,3);
+    } else {
+        lcd.print(ActualCurrent,2);
+    }
+    
     lcd.print("A");
-    lcd.print(" ");                                        //two spaces between actual current and voltage readings
-    lcd.print(ActualVoltage,VoltsDecimalPlaces);
+    lcd.print(" ");
+    
+    if (ActualVoltage < 10.0) {
+        lcd.print(ActualVoltage, 3);
+    } else {
+        lcd.print(ActualVoltage, 2);
+    }    
+
     lcd.print("V");
-    lcd.print(" "); 
-    lcd.print(ActualPower,2);
+    lcd.print(" ");
+     
+    if (ActualPower < 100 ) {
+        lcd.print(ActualPower,2);
+    } else {
+        lcd.print(ActualPower,1);
+    }
     lcd.print("W");
     lcd.print(" ");
 }
@@ -538,16 +579,17 @@ void dacControlVoltage (void) {
   controlVoltage = setControlCurrent; 
   }
 
-if (Mode == "TC" || Mode == "TP" || Mode == "TT"){                            //Transient Mode - Continuous
+if (Mode == "TC" || Mode == "TP" || Mode == "TT" || Mode == "TL"){                            //Transient Modes
   setControlCurrent = (setCurrent * 1000) * setCurrentCalibrationFactor;
   controlVoltage = setControlCurrent; 
   }
 
 }
 
-//-----------------------Battery Capacity Discharge Routine-----------------------------------
+//-------------------------------------Battery Capacity Discharge Routine----------------------------------------------------
 void batteryCapacity (void) {
   if (Mode == "BC"){
+    
     setCurrent = reading*1000;                             //set current is equal to input value in Amps
     setReading = setCurrent;                               //show the set current reading being used
     setControlCurrent = setCurrent * setCurrentCalibrationFactor;
@@ -600,44 +642,40 @@ void batteryCapacity (void) {
   }
 }
 
-//-----------------------Fan Control----------------------------------------------------------
+//--------------------------------------------------Fan Control----------------------------------------------------------
 void fanControl (void) {
   temp = analogRead(temperature);
-  temp = temp * 0.107421875; // convert to Celsius
+  temp = temp * 0.107421875;                                // convert to Celsius
   
-  if (temp < tempMin) {                                   //is temperature lower than minimum setting
-    fanSpeed = 0;                                         //fan turned off
-    digitalWrite(fan, LOW);
-    lcd.setCursor(16,0);
-    lcd.print(temp);
-    lcd.print((char)0xDF);
-    lcd.print("C");   
+  if (temp >= 40){                                        //if temperature 40 degree C or above turn fan on.
+    digitalWrite(fan, HIGH); 
+  }  else {
+    digitalWrite(fan, LOW);                               //otherwise turn fan turned off
   }
   
-  if ((temp >= tempMin) && (temp <= tempMax)){
-    fanSpeed = map(temp, tempMin, tempMax, 131, 255);
-    //Serial.print("Fan Speed");                          //used for testing only
-    //Serial.println(fanSpeed);                           //used for testing only
-    analogWrite(fan, fanSpeed);
-    lcd.setCursor(16,0);
-    lcd.print(temp);
-    lcd.print((char)0xDF);
-    lcd.print("C");
-  }
+  lcd.setCursor(16,0);
+  lcd.print(temp);                                        //display temperature of heatsink on LCD
+  lcd.print((char)0xDF);
+  lcd.print("C");
+
 }
 
+  
 //-----------------------Toggle Current Load ON or OFF------------------------------
 void LoadSwitch(void) {
-if (digitalRead(LoadOnOff) == LOW) {
-    
+  
   delay(200);                                              //simple key bounce delay 
  
     if(toggle)
     {
       lcd.setCursor(8,0);
       lcd.print("OFF");
-      //Load = 0;
-      toggle = !toggle;        
+      current_instruction = 0;                            //reset current instruction for Transient List Mode to zero
+      last_time = 0;                                      //reset last time to zero
+      transientPeriod = 0;                                //reset transient period time to zero
+      setCurrent = 0;                                     //reset setCurrent to zero
+      toggle = !toggle;
+      Load = 0;        
     }
     else
     {
@@ -645,12 +683,11 @@ if (digitalRead(LoadOnOff) == LOW) {
       lcd.print("ON ");
       lcd.setCursor(0,3);
       lcd.print("                    ");                 //clear bottom line of LCD
-      //Load = 1;
       toggle = !toggle;
+      Load = 1;
     }
-  //delay(100);                                          //simple delay for key debounce (commented out if not required)
 }
-}
+
 //-----------------------Select Constant Current LCD set up--------------------------------
 void Current(void) {
   Mode = ("CC");
@@ -684,7 +721,7 @@ void Power(void) {
   lcd.print("W");
   lcd.setCursor(0,3);                                   //clear last line of time info
   lcd.print("                    ");                    //20 spaces so as to allow for Load ON/OFF to still show
-  CP = 9;                                               //sets cursor starting position to units.
+  CP = 10;                                               //sets cursor starting position to units.
 }
 
 //----------------------- Select Constant Resistance LCD set up---------------------------------------
@@ -702,7 +739,7 @@ void Resistance(void) {
   lcd.print((char)0xF4);
   lcd.setCursor(0,3);                                   //clear last line of time info
   lcd.print("                    ");                    //20 spaces so as to allow for Load ON/OFF to still show
-  CP = 9;                                               //sets cursor starting position to units.
+  CP = 10;                                               //sets cursor starting position to units.
 }
 
 //----------------------- Select Battery Capacity Testing LCD set up---------------------------------------
@@ -765,7 +802,7 @@ void batteryType (void) {
     }
 
   if (customKey == '7' || customKey == '8' || customKey == '9' || customKey == '0' || customKey == 'A' || customKey == 'B' || customKey == 'C' || customKey == 'D' || customKey == '*' || customKey == '#'){
-  batteryType();                                                      //ignore other keys
+  batteryType();                                                        //ignore other keys
     }
 
   if(BatteryType == "SetV" && exitMode != 1){
@@ -778,19 +815,6 @@ void batteryType (void) {
 
 }
 
-//--------------------------Zero Setting Offset Routine--------------------------------------------
-void zeroOffset (void) {
-
-  delay(200);                                            //simple key bounce delay 
-  readVoltageCurrent();                                  //routine for ADC to read actual Voltage and Current
-  voltageOffset = voltage;
-  currentOffset = current;
-
- //Serial.print("voltageOffset = ");                    //used for testing only
- //Serial.println(voltageOffset);                       //used for testing only
- //Serial.print("currentOffset = ");                    //used for testing only
- //Serial.println(currentOffset);                       //used for testing only
-}
 //--------------------------Set DAC Voltage--------------------------------------------
 void dacControl (void) {
   if (!toggle){
@@ -847,8 +871,7 @@ void setBatteryCutOff (void) {
 //------------------------Key input used for Battery Cut-Off and Transient Mode------------------------
 void inputValue (void){
 
- while(customKey != '#')
- {
+ while(customKey != '#'){               //check if enter pressed (was previously #)
   
   customKey = customKeypad.getKey();
   if(customKey >= '0' && customKey <= '9'){               //check for keypad number input
@@ -859,7 +882,7 @@ void inputValue (void){
        z = z+1;
      }
   
-  if(customKey == '*'){                                   //check if ZERO READING key pressed
+  if(customKey == '*'){                                   //Decimal point
       if (decimalPoint != ('*')){                         //test if decimal point entered twice - if so ski
       numbers[index++] = '.';
       numbers[index] = '\0';
@@ -881,7 +904,7 @@ void inputValue (void){
 
  }
  
-  if(customKey == '#') {                                  //check if Load ON/OFF button pressed
+  if(customKey == '#') {                                  //enter value 
     x = atof(numbers);     
     index = 0;
     numbers[index] = '\0';
@@ -891,6 +914,8 @@ void inputValue (void){
 
 //----------------------------------------Transient Mode--------------------------------------------
 void transientMode (void) {
+
+if(Mode != "TL"){
 
   y = 11;
   z = 11;
@@ -905,6 +930,7 @@ void transientMode (void) {
   lcd.print("A");
   r = 1;
   inputValue();
+  
   if(x >= CurrentCutOff){
     LowCurrent = CurrentCutOff;
   }else{
@@ -950,12 +976,19 @@ void transientMode (void) {
   lcd.print("                    ");
   }
 
-lcd.clear();
+  lcd.clear();
 
-toggle = false;                                           //switch Load OFF
-lcd.setCursor(8,0);
-lcd.print("OFF");                                         //print on display OFF
-
+  toggle = false;                                           //switch Load OFF
+  lcd.setCursor(8,0);
+  lcd.print("OFF");                                         //print on display OFF
+    }else{  
+  transientListSetup();
+  lcd.clear();
+ 
+  toggle = false;                                           //switch Load OFF
+  lcd.setCursor(8,0);
+  lcd.print("OFF");                                         //print on display OFF
+  }
 }
 
 //----------------------------------------Transient Type Selection--------------------------------------------
@@ -973,7 +1006,9 @@ void transientType (void) {
   lcd.setCursor(11,2);                                    //
   lcd.print("3 = Pulse");                                 //
   lcd.setCursor(0,3);                                     //
-  lcd.print("4 = Exit");                                  //
+  lcd.print("4 = List");                                  //
+  lcd.setCursor(11,3);                                    //
+  lcd.print("5 = Exit");                                  //
 
   customKey = customKeypad.waitForKey();                  //stop everything till the user press a key.
 
@@ -989,11 +1024,15 @@ void transientType (void) {
   Mode = ("TP");  
     }
 
-  if (customKey == '4'){                                  //Exit selection screen
+  if (customKey == '4'){
+  Mode = ("TL");  
+    }
+
+  if (customKey == '5'){                                  //Exit selection screen
   exitMode = 1;
     }
 
-  if (customKey == '5' || customKey == '6' || customKey == '7' || customKey == '8' || customKey == '9' || customKey == '0' || customKey == 'A' || customKey == 'B' || customKey == 'C' || customKey == 'D' || customKey == '*' || customKey == '#'){
+  if (customKey == '6' || customKey == '7' || customKey == '8' || customKey == '9' || customKey == '0' || customKey == 'A' || customKey == 'B' || customKey == 'C' || customKey == 'D' || customKey == '*' || customKey == '#'){
   transientType();                                                      //ignore other keys
   
     }
@@ -1012,10 +1051,13 @@ if (exitMode == 1){                                       //if NO Transient Mode
  
 //----------------------------------------Transient--------------------------------------------
 void transient (void) {
-  if(Mode == "TC" || Mode == "TP" || Mode == "TT"){
+  
+  if(Mode == "TC" || Mode == "TP" || Mode == "TT" || Mode == "TL"){
   lcd.noCursor();                                         //switch Cursor OFF for this menu 
   lcd.setCursor(0,0);
   lcd.print("DC LOAD");
+  
+  if(Mode != "TL"){
   lcd.setCursor(0,2);
   lcd.print("Lo=");
   lcd.setCursor(3,2);
@@ -1028,8 +1070,12 @@ void transient (void) {
   lcd.print(HighCurrent,3);
   lcd.setCursor(19,2);
   lcd.print("A");
+  }else{
+    delay(1);
+  }
 
-  if(Mode == "TC" || Mode == "TP"){
+
+  if(Mode == "TC" || Mode == "TP" || Mode == "TL"){
   lcd.setCursor(0,3);                                     //
   lcd.print("Time = ");
   lcd.setCursor(7,3);
@@ -1042,6 +1088,53 @@ void transient (void) {
     }
   }
 delay(1);
+}
+
+//-------------------------------------Transcient List Setup-------------------------------------------
+void transientListSetup(){
+  //int i = 0;
+  lcd.noCursor();                                                 
+  lcd.clear();
+  lcd.setCursor(0,0);
+  lcd.print("Setup Transient List");
+  lcd.setCursor(0,1);
+  lcd.print("Enter Number in List");
+  lcd.setCursor(0,2);
+  lcd.print("(between 2 to 10 max"); 
+  y = 0;
+  z = 0;
+  r = 3;
+  inputValue();
+  total_instructions = int(x-1);
+  customKey = '0';
+  lcd.clear();
+  
+    for(int i=0; i<=(total_instructions); i++){
+      lcd.setCursor(0,0);
+      lcd.print("Set Current ");
+      lcd.print(i+1);
+      lcd.setCursor(16,1);
+      lcd.print("A");
+      y = 0;
+      z = 0;
+      r = 1;
+      inputValue();            //get the users input value
+      transientList[i][0] = x; //store the users entered value in the transient list 
+      customKey = '0';
+      lcd.setCursor(0,2);
+      lcd.print("Set Time ");
+      lcd.print(i+1);
+      lcd.setCursor(16,3);
+      lcd.print("mSec");
+      y = 0;
+      z = 0;
+      r = 3;
+      inputValue();            //get the users input value
+      transientList[i][1] = x; //store the users entered value in the transient list
+      customKey = '0';
+      lcd.clear();   
+  }
+  current_instruction = 0;      //start at first instrution
 }
 
 //-------------------------------------Transcient Load Toggel-------------------------------------------
@@ -1088,8 +1181,7 @@ void transientLoadToggle(){
   }
 
 
- if(Mode == "TT"){
-// this function will toggle between high and low current when the trigger pin is taken low
+ if(Mode == "TT"){          // this function will toggle between high and low current when the trigger pin is taken low
   if (digitalRead(TriggerPulse) == LOW){
     switch (transient_mode_status){
       case (false):
@@ -1098,9 +1190,29 @@ void transientLoadToggle(){
       case (true):
         transientSwitch(HighCurrent, true);   
         break;
+      }
     }
   }
-}
+
+
+if(Mode == "TL"){
+  if (Load == 1){                                           // Only perform Transient List if Load is ON
+   current_time = micros();                              //get the current time in micro seconds()
+    if (last_time == 0){
+      last_time = current_time;
+      transientPeriod = transientList[current_instruction][1];   //Time data for LCD display
+      transientSwitch(transientList[current_instruction][0], false);
+    }
+    if((current_time - last_time) >= transientList[current_instruction][1] * 1000){     //move to next list instruction
+        current_instruction++;
+        if(current_instruction > total_instructions){
+          current_instruction = 0;
+        }
+      transientPeriod = transientList[current_instruction][1];   //Time data for LCD display
+      transientSwitch(transientList[current_instruction][0], false);
+      }
+    }
+  }
 
 }
 
@@ -1110,13 +1222,15 @@ void transientSwitch(float current_setting, boolean toggle_status){
   transient_mode_status = !transient_mode_status;
   }
   setCurrent = current_setting;
+  //Serial.print("set current = ");                     //used for testing only
+  //Serial.println(setCurrent);                         //used for testing only
   last_time = current_time;
 }
 
-//-------------------------------------User set up-------------------------------------------------
+//-------------------------------------User set up for limits-------------------------------------------------
 void userSetUp (void) {
-y = 14;
-z = 14;
+  y = 14;
+  z = 14;
   
   lcd.noCursor();                                       //switch Cursor OFF for this menu               
   lcd.clear();
@@ -1129,12 +1243,13 @@ z = 14;
   r = 1;
   inputValue();
   CurrentCutOff = x;
+  EEPROM.write(0x00, CurrentCutOff);
   lcd.setCursor(14,r);
-  lcd.print(CurrentCutOff,3);
+  lcd.print(CurrentCutOff);
   
-customKey = '0';
+  customKey = '0';
 
-z = 14;
+  z = 14;
 
   lcd.setCursor(0,2);
   lcd.print("Power Limit  =");
@@ -1143,25 +1258,26 @@ z = 14;
   r = 2;
   inputValue();
   PowerCutOff = x;
+  EEPROM.write(0x20, PowerCutOff);              //
   lcd.setCursor(14,r);
-  lcd.print(PowerCutOff,2);
+  lcd.print(PowerCutOff);
 
-customKey = '0';
+  customKey = '0';
 
-z = 14;
+  z = 14;
 
   lcd.setCursor(0,3);
-  lcd.print("Temperature  =");
+  lcd.print("Temp. Limit  =");
   lcd.setCursor(18,3);
   lcd.print((char)0xDF);
   lcd.print("C");
   r = 3;
   inputValue();
   tempCutOff = x;
+  EEPROM.write(0x40, tempCutOff);
   lcd.setCursor(14,r);
   lcd.print(tempCutOff);
 
-    //delay(500);                                             //used in testing only
     lcd.clear();
 
     lcd.setCursor(8,0);
@@ -1185,12 +1301,67 @@ void temperatureCutOff (void){
   toggle = false;                                         //switch Load Off
   }
 }
-//------------------------------------------------------------------------------------------------------------------------------
-//-------------------------------------------------------------------------------------------------------------------------------
 
+//-----------------------------------------Current Read Calibration for LCD Display --------------------------------------------
+void currentDisplayCal (void){
 
-void timerIsr() {
-    // Toggle LED
-    digitalWrite( 13, digitalRead( 13 ) ^ 1 );
+  if(ActualCurrent <= 0){
+    ActualCurrent = 0;
+  }else if(Load == 0){
+    ActualCurrent = 0;
+  }else{
+  ActualCurrent = ActualCurrent + displayCurrentCal;
+  }
+
+/*  if (ActualCurrent <= 0.5)
+    {
+    ActualCurrent = (ActualCurrent +(displayCurrentCal * 3));
+    }
+    else if (ActualCurrent >= 0.5 && ActualCurrent <1.0)
+    {
+    ActualCurrent = (ActualCurrent + (displayCurrentCal * 2));
+    }
+    else if (ActualCurrent >= 1.0 && ActualCurrent <= 1.4)
+    {
+    ActualCurrent = (ActualCurrent + (displayCurrentCal));
+    }
+    else 
+    {
+    ActualCurrent = ActualCurrent;
+    }
+*/
 }
+  
+//-----------------------------Show limits Stored Data for Current, Power and Temp-----------------------------
+  void setupLimits (void){
+  lcd.clear();
+  lcd.setCursor(1,0);
+  lcd.print("Maximum Limits Set");
+  lcd.setCursor(0,1);
+  lcd.print("Current Limit=");
+  lcd.setCursor(17,1);
+  lcd.print("A");
+  lcd.setCursor(15,1);
+  CurrentCutOff = EEPROM.read(0x00);
+  lcd.print(CurrentCutOff);
+
+  lcd.setCursor(0,2);
+  lcd.print("Power Limit  =");
+  lcd.setCursor(17,2);
+  lcd.print("W");
+  lcd.setCursor(15,2);
+  PowerCutOff = EEPROM.read(0x20);
+  lcd.print(PowerCutOff);
+
+  lcd.setCursor(0,3);
+  lcd.print("Temp. Limit  =");
+  lcd.setCursor(17,3);
+  lcd.print((char)0xDF);
+  lcd.print("C");
+  tempCutOff = EEPROM.read(0x40);
+  lcd.setCursor(15,3);
+  lcd.print(tempCutOff);
+  }
+  
+  //---------------------------------------------------------------------------------------------------------
 
