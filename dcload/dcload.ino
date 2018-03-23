@@ -146,6 +146,7 @@ boolean transient_mode_status;      //used to maintain the state of the trasient
 //--------------------------------Interrupt Routine for Rotary Encoder------------------------
 void isr()
 {
+  noInterrupts();
   static unsigned long lastInterruptTime = 0;
   unsigned long interruptTime = millis();
 
@@ -159,7 +160,8 @@ void isr()
     encoderPosition = min(encoderMax, max(0, encoderPosition));  // sets maximum range of rotary encoder
     lastInterruptTime = interruptTime;
   }
-    }
+  interrupts();
+}
 //---------------------------------Initial Set up---------------------------------------
 void setup() {
   Serial.begin(9600);                                      //used for testing only
@@ -187,7 +189,7 @@ void setup() {
  
   analogReference(INTERNAL);                               //use Arduino internal reference for tempurature monitoring
 
-  attachInterrupt(digitalPinToInterrupt(pinA), isr, LOW);
+  attachInterrupt(digitalPinToInterrupt(pinB), isr, LOW);
 
   dac.begin(0x61);                                         //the DAC I2C address with MCP4725 pin A0 set high
   dac.setVoltage(0,false);                                 //reset DAC to zero for no output current set at Switch On
